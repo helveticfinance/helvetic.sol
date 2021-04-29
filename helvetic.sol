@@ -1,5 +1,5 @@
 /**
- *Submitted for verification at BscScan.com on 2021-04-22
+ *Submitted for verification at BscScan.com on 2021-04-29
 */
 
 pragma solidity ^0.8.4;
@@ -695,6 +695,8 @@ contract Helvetic is Context, IERC20, Ownable {
 	mapping (address => bool) private _isExcluded;
 	address[] private _excluded;
 
+    address private _charityWalletAddress = 0x5A065dBE0e776B4BaF16dC4BE4D899f4E2769AF6;
+
 	uint256 private constant MAX = ~uint256(0);
 	uint256 private _tTotal = 1000000000 * 10**6 * 10**9;
 	uint256 private _rTotal = (MAX - (MAX % _tTotal));
@@ -704,11 +706,14 @@ contract Helvetic is Context, IERC20, Ownable {
 	string private _symbol = "HELVETIC";
 	uint8 private _decimals = 9;
 
-	uint256 public _taxFee = 5;
+	uint256 public _taxFee = 2;
 	uint256 private _previousTaxFee = _taxFee;
 
-	uint256 public _liquidityFee = 5;
+	uint256 public _liquidityFee = 2;
 	uint256 private _previousLiquidityFee = _liquidityFee;
+
+	uint256 public _charityFee = 2;
+	uint256 private _previousCharityFee = _charityFee;
 
 	IUniswapV2Router02 public immutable uniswapV2Router;
 	address public immutable uniswapV2Pair;
@@ -813,7 +818,7 @@ contract Helvetic is Context, IERC20, Ownable {
 	function deliver(uint256 tAmount) public {
 		address sender = _msgSender();
 		require(!_isExcluded[sender], "Excluded addresses cannot call this function");
-		(uint256 rAmount,,,,,) = _getValues(tAmount);
+		(uint256 rAmount,,,,,,) = _getValues(tAmount);
 		_rOwned[sender] = _rOwned[sender].sub(rAmount);
 		_rTotal = _rTotal.sub(rAmount);
 		_tFeeTotal = _tFeeTotal.add(tAmount);
@@ -822,10 +827,10 @@ contract Helvetic is Context, IERC20, Ownable {
 	function reflectionFromToken(uint256 tAmount, bool deductTransferFee) public view returns(uint256) {
 		require(tAmount <= _tTotal, "Amount must be less than supply");
 		if (!deductTransferFee) {
-			(uint256 rAmount,,,,,) = _getValues(tAmount);
+			(uint256 rAmount,,,,,,) = _getValues(tAmount);
 			return rAmount;
 		} else {
-			(,uint256 rTransferAmount,,,,) = _getValues(tAmount);
+			(,uint256 rTransferAmount,,,,,) = _getValues(tAmount);
 			return rTransferAmount;
 		}
 	}
@@ -858,13 +863,15 @@ contract Helvetic is Context, IERC20, Ownable {
 			}
 		}
 	}
-		function _transferBothExcluded(address sender, address recipient, uint256 tAmount) private {
-		(uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee, uint256 tLiquidity) = _getValues(tAmount);
+
+	function _transferBothExcluded(address sender, address recipient, uint256 tAmount) private {
+		(uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee, uint256 tLiquidity, uint256 tCharity) = _getValues(tAmount);
 		_tOwned[sender] = _tOwned[sender].sub(tAmount);
 		_rOwned[sender] = _rOwned[sender].sub(rAmount);
 		_tOwned[recipient] = _tOwned[recipient].add(tTransferAmount);
 		_rOwned[recipient] = _rOwned[recipient].add(rTransferAmount);
 		_takeLiquidity(tLiquidity);
+		_takeCharity(tCharity);
 		_reflectFee(rFee, tFee);
 		emit Transfer(sender, recipient, tTransferAmount);
 	}
@@ -883,6 +890,10 @@ contract Helvetic is Context, IERC20, Ownable {
 
 	function setLiquidityFeePercent(uint256 liquidityFee) external onlyOwner() {
 		_liquidityFee = liquidityFee;
+	}
+
+	function setCharityFeePercent(uint256 charityFee) external onlyOwner() {
+		_charityFee = charityFee;
 	}
 
 	function setMaxTxPercent(uint256 maxTxPercent) external onlyOwner() {
@@ -904,24 +915,26 @@ contract Helvetic is Context, IERC20, Ownable {
 		_tFeeTotal = _tFeeTotal.add(tFee);
 	}
 
-	function _getValues(uint256 tAmount) private view returns (uint256, uint256, uint256, uint256, uint256, uint256) {
-		(uint256 tTransferAmount, uint256 tFee, uint256 tLiquidity) = _getTValues(tAmount);
-		(uint256 rAmount, uint256 rTransferAmount, uint256 rFee) = _getRValues(tAmount, tFee, tLiquidity, _getRate());
-		return (rAmount, rTransferAmount, rFee, tTransferAmount, tFee, tLiquidity);
+	function _getValues(uint256 tAmount) private view returns (uint256, uint256, uint256, uint256, uint256, uint256, uint256) {
+		(uint256 tTransferAmount, uint256 tFee, uint256 tLiquidity, uint256 tCharity) = _getTValues(tAmount);
+		(uint256 rAmount, uint256 rTransferAmount, uint256 rFee) = _getRValues(tAmount, tFee, tLiquidity, tCharity, _getRate());
+		return (rAmount, rTransferAmount, rFee, tTransferAmount, tFee, tLiquidity, tCharity);
 	}
 
-	function _getTValues(uint256 tAmount) private view returns (uint256, uint256, uint256) {
+	function _getTValues(uint256 tAmount) private view returns (uint256, uint256, uint256, uint256) {
 		uint256 tFee = calculateTaxFee(tAmount);
 		uint256 tLiquidity = calculateLiquidityFee(tAmount);
-		uint256 tTransferAmount = tAmount.sub(tFee).sub(tLiquidity);
-		return (tTransferAmount, tFee, tLiquidity);
+		uint256 tCharity = calculateCharityFee(tAmount);
+		uint256 tTransferAmount = tAmount.sub(tFee).sub(tLiquidity).sub(tCharity);
+		return (tTransferAmount, tFee, tLiquidity, tCharity);
 	}
 
-	function _getRValues(uint256 tAmount, uint256 tFee, uint256 tLiquidity, uint256 currentRate) private pure returns (uint256, uint256, uint256) {
+	function _getRValues(uint256 tAmount, uint256 tFee, uint256 tLiquidity, uint256 tCharity, uint256 currentRate) private pure returns (uint256, uint256, uint256) {
 		uint256 rAmount = tAmount.mul(currentRate);
 		uint256 rFee = tFee.mul(currentRate);
 		uint256 rLiquidity = tLiquidity.mul(currentRate);
-		uint256 rTransferAmount = rAmount.sub(rFee).sub(rLiquidity);
+		uint256 rCharity = tCharity.mul(currentRate);
+		uint256 rTransferAmount = rAmount.sub(rFee).sub(rLiquidity).sub(rCharity);
 		return (rAmount, rTransferAmount, rFee);
 	}
 
@@ -950,6 +963,14 @@ contract Helvetic is Context, IERC20, Ownable {
 			_tOwned[address(this)] = _tOwned[address(this)].add(tLiquidity);
 	}
 
+	function _takeCharity(uint256 tCharity) private {
+		uint256 currentRate = _getRate();
+		uint256 rCharity = tCharity.mul(currentRate);
+		_rOwned[_charityWalletAddress] = _rOwned[_charityWalletAddress].add(rCharity);
+		if(_isExcluded[_charityWalletAddress])
+			_tOwned[_charityWalletAddress] = _tOwned[_charityWalletAddress].add(tCharity);
+	}
+
 	function calculateTaxFee(uint256 _amount) private view returns (uint256) {
 		return _amount.mul(_taxFee).div(
 			10**2
@@ -962,19 +983,28 @@ contract Helvetic is Context, IERC20, Ownable {
 		);
 	}
 
+	function calculateCharityFee(uint256 _amount) private view returns (uint256) {
+		return _amount.mul(_charityFee).div(
+			10**2
+		);
+	}
+
 	function removeAllFee() private {
-		if(_taxFee == 0 && _liquidityFee == 0) return;
+		if(_taxFee == 0 && _liquidityFee == 0 && _charityFee == 0) return;
 
 		_previousTaxFee = _taxFee;
 		_previousLiquidityFee = _liquidityFee;
+		_previousCharityFee = _charityFee;
 
 		_taxFee = 0;
 		_liquidityFee = 0;
+		_charityFee = 0;
 	}
 
 	function restoreAllFee() private {
 		_taxFee = _previousTaxFee;
 		_liquidityFee = _previousLiquidityFee;
+		_charityFee = _previousCharityFee;
 	}
 
 	function isExcludedFromFee(address account) public view returns(bool) {
@@ -1113,30 +1143,33 @@ contract Helvetic is Context, IERC20, Ownable {
 	}
 
 	function _transferStandard(address sender, address recipient, uint256 tAmount) private {
-		(uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee, uint256 tLiquidity) = _getValues(tAmount);
+		(uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee, uint256 tLiquidity, uint256 tCharity) = _getValues(tAmount);
 		_rOwned[sender] = _rOwned[sender].sub(rAmount);
 		_rOwned[recipient] = _rOwned[recipient].add(rTransferAmount);
 		_takeLiquidity(tLiquidity);
+		_takeCharity(tCharity);
 		_reflectFee(rFee, tFee);
 		emit Transfer(sender, recipient, tTransferAmount);
 	}
 
 	function _transferToExcluded(address sender, address recipient, uint256 tAmount) private {
-		(uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee, uint256 tLiquidity) = _getValues(tAmount);
+		(uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee, uint256 tLiquidity, uint256 tCharity) = _getValues(tAmount);
 		_rOwned[sender] = _rOwned[sender].sub(rAmount);
 		_tOwned[recipient] = _tOwned[recipient].add(tTransferAmount);
 		_rOwned[recipient] = _rOwned[recipient].add(rTransferAmount);
 		_takeLiquidity(tLiquidity);
+		_takeCharity(tCharity);
 		_reflectFee(rFee, tFee);
 		emit Transfer(sender, recipient, tTransferAmount);
 	}
 
 	function _transferFromExcluded(address sender, address recipient, uint256 tAmount) private {
-		(uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee, uint256 tLiquidity) = _getValues(tAmount);
+		(uint256 rAmount, uint256 rTransferAmount, uint256 rFee, uint256 tTransferAmount, uint256 tFee, uint256 tLiquidity, uint256 tCharity) = _getValues(tAmount);
 		_tOwned[sender] = _tOwned[sender].sub(tAmount);
 		_rOwned[sender] = _rOwned[sender].sub(rAmount);
 		_rOwned[recipient] = _rOwned[recipient].add(rTransferAmount);
 		_takeLiquidity(tLiquidity);
+		_takeCharity(tCharity);
 		_reflectFee(rFee, tFee);
 		emit Transfer(sender, recipient, tTransferAmount);
 	}
